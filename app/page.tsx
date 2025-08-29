@@ -8,17 +8,20 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Plus, TrendingUp, TrendingDown, Wallet, PiggyBank, Loader2, ImageIcon } from "lucide-react"
+import { Plus, TrendingUp, TrendingDown, Wallet, Loader2, ImageIcon } from "lucide-react"
 import { AccountSelector } from "@/components/account-selector"
 import { CategorySelector } from "@/components/category-selector"
 import { TransferPreview } from "@/components/transfer-preview"
 import { TransactionActions } from "@/components/transaction-actions"
 import { HelpTooltip } from "@/components/help-tooltip"
 import { ClockWidget } from "@/components/clock-widget"
+import { useAuth } from "@/contexts/auth-context"
+import { DatabaseService } from "@/lib/database"
 import type { Account, Transaction, DashboardPeriod, UserProfile, Category } from "@/types"
-import { supabase } from "@/lib/supabase"
 
 export default function DashboardPage() {
+  const { user } = useAuth()
+
   // State untuk data dari Supabase
   const [accounts, setAccounts] = useState<Account[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -31,8 +34,8 @@ export default function DashboardPage() {
   const [dashboardPeriod, setDashboardPeriod] = useState<DashboardPeriod>("monthly")
   const [userProfile, setUserProfile] = useState<UserProfile>({
     id: "1",
-    name: "Megumi",
-    email: "megumi@example.com",
+    name: user?.user_metadata?.full_name || "User",
+    email: user?.email || "",
     avatar: "/diverse-user-avatars.png",
     isLoggedIn: true,
   })
@@ -48,31 +51,23 @@ export default function DashboardPage() {
     receiptFile: null as File | null,
   })
 
-  // Fungsi untuk mengambil semua data awal
   const fetchData = async () => {
+    if (!user) return
+
     try {
-      const { data: platformData, error: platformError } = await supabase.from("platforms").select("*")
-      if (platformError) throw platformError
-
-      const { data: transactionData, error: transactionError } = await supabase
-        .from("transactions")
-        .select("*")
-        .order("date", { ascending: false })
-      if (transactionError) throw transactionError
-
-      const { data: categoryData, error: categoryError } = await supabase.from("categories").select("*")
-      if (categoryError) throw categoryError
+      const [platformData, transactionData, categoryData] = await Promise.all([
+        DatabaseService.getPlatforms(user.id),
+        DatabaseService.getTransactions(user.id),
+        DatabaseService.getCategories(user.id),
+      ])
 
       const categoryMap = new Map<string, { type: string; subcategories: string[] }>()
-      ;(categoryData || []).forEach((item) => {
-        if (!categoryMap.has(item.category)) {
-          categoryMap.set(item.category, {
-            type: item.category === "Pemasukan" ? "income" : "expense",
+      categoryData.forEach((item) => {
+        if (!categoryMap.has(item.name)) {
+          categoryMap.set(item.name, {
+            type: item.type,
             subcategories: [],
           })
-        }
-        if (item["sub-category"]) {
-          categoryMap.get(item.category)!.subcategories.push(item["sub-category"])
         }
       })
 
@@ -85,7 +80,7 @@ export default function DashboardPage() {
       }))
 
       setAccounts(
-        (platformData || []).map((p) => ({
+        platformData.map((p) => ({
           id: p.id,
           name: p.account,
           type: p.type_account,
@@ -96,7 +91,7 @@ export default function DashboardPage() {
       )
       setCategories(structuredCategories)
       setTransactions(
-        (transactionData || []).map((tx) => ({
+        transactionData.map((tx) => ({
           id: tx.id,
           date: tx.date,
           description: tx.description,
@@ -119,6 +114,18 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
+    if (user) {
+      setUserProfile({
+        id: user.id,
+        name: user.user_metadata?.full_name || "User",
+        email: user.email || "",
+        avatar: "/diverse-user-avatars.png",
+        isLoggedIn: true,
+      })
+    }
+  }, [user])
+
+  useEffect(() => {
     const handleTransactionAdded = () => {
       fetchData()
     }
@@ -130,8 +137,10 @@ export default function DashboardPage() {
   }, [])
 
   useEffect(() => {
-    fetchData()
-  }, [])
+    if (user) {
+      fetchData()
+    }
+  }, [user])
 
   const { totalBalance, savingsBalance, dailyBalance, periodData } = useMemo(() => {
     const total = accounts.reduce((sum, account) => sum + account.balance, 0)
@@ -173,6 +182,8 @@ export default function DashboardPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!user) return
+
     const amount = Number.parseFloat(formData.amount)
     if (isNaN(amount) || amount <= 0) {
       alert("Jumlah harus berupa angka positif.")
@@ -199,22 +210,6 @@ export default function DashboardPage() {
       }
     }
 
-    let receiptUrl: string | null = null
-    if (formData.receiptFile) {
-      const file = formData.receiptFile
-      const filePath = `public/${Date.now()}-${file.name}`
-      const { error: uploadError } = await supabase.storage.from("receipts").upload(filePath, file)
-
-      if (uploadError) {
-        console.error("Error uploading receipt:", uploadError)
-        alert("Gagal mengunggah bukti transaksi.")
-        return
-      }
-
-      const { data: urlData } = supabase.storage.from("receipts").getPublicUrl(filePath)
-      receiptUrl = urlData.publicUrl
-    }
-
     const transactionData = {
       date: formData.date,
       description: formData.description,
@@ -223,26 +218,25 @@ export default function DashboardPage() {
       nominal: formData.type === "expense" ? -amount : amount,
       account: fromAccount.name,
       destination_account: toAccountName,
-      receipt_url: receiptUrl,
+      receipt_url: null,
+      user_id: user.id,
     }
 
-    const { error: insertError } = await supabase.from("transactions").insert([transactionData])
-
-    if (insertError) {
-      console.error("Error inserting transaction:", insertError)
+    const result = await DatabaseService.addTransaction(transactionData, user.id)
+    if (!result) {
       alert("Gagal menyimpan transaksi.")
       return
     }
 
     // Update saldo akun
     const newFromBalance = fromAccount.balance + transactionData.nominal
-    await supabase.from("platforms").update({ saldo: newFromBalance }).eq("id", fromAccount.id)
+    await DatabaseService.updatePlatform(fromAccount.id, { saldo: newFromBalance }, user.id)
 
     if (formData.category === "Mutasi") {
       const toAccount = accounts.find((acc) => acc.name === toAccountName)
       if (toAccount) {
         const newToBalance = toAccount.balance + amount
-        await supabase.from("platforms").update({ saldo: newToBalance }).eq("id", toAccount.id)
+        await DatabaseService.updatePlatform(toAccount.id, { saldo: newToBalance }, user.id)
       }
     }
 
@@ -261,11 +255,9 @@ export default function DashboardPage() {
     })
   }
 
-  // DIUBAH: Fungsi ini sekarang akan meng-update data di Supabase
   const handleTransactionUpdate = async (updatedTransaction: Transaction) => {
-    // Note: Logika kalkulasi ulang saldo saat update bisa menjadi sangat kompleks.
-    // Cara paling aman adalah dengan me-refresh semua data setelah update berhasil.
-    // Untuk saat ini, kita akan update transaksinya saja.
+    if (!user) return
+
     const transactionDataToUpdate = {
       date: updatedTransaction.date,
       description: updatedTransaction.description,
@@ -276,52 +268,41 @@ export default function DashboardPage() {
       destination_account: updatedTransaction.toAccountId,
     }
 
-    const { error } = await supabase
-      .from("transactions")
-      .update(transactionDataToUpdate)
-      .eq("id", updatedTransaction.id)
-
-    if (error) {
-      console.error("Error updating transaction:", error)
+    const result = await DatabaseService.updateTransaction(updatedTransaction.id, transactionDataToUpdate, user.id)
+    if (!result) {
       alert("Gagal memperbarui transaksi.")
     } else {
-      // Jika berhasil, ambil ulang semua data untuk memastikan konsistensi
       await fetchData()
     }
   }
 
-  // DIUBAH: Fungsi ini sekarang akan menghapus data di Supabase
   const handleTransactionDelete = async (transactionId: string) => {
-    // 1. Cari transaksi yang akan dihapus untuk mendapatkan detailnya
+    if (!user) return
+
     const transactionToDelete = transactions.find((t) => t.id === transactionId)
     if (!transactionToDelete) return
 
-    // 2. Hapus transaksi dari Supabase
-    const { error: deleteError } = await supabase.from("transactions").delete().eq("id", transactionId)
-
-    if (deleteError) {
-      console.error("Failed to delete transaction:", deleteError)
+    const success = await DatabaseService.deleteTransaction(transactionId, user.id)
+    if (!success) {
       alert("Gagal menghapus transaksi.")
       return
     }
 
-    // 3. Kembalikan saldo akun yang terpengaruh
+    // Update account balances
     const fromAccount = accounts.find((acc) => acc.name === transactionToDelete.accountId)
     if (fromAccount) {
-      // Mengurangi nominal (jika pengeluaran, -(-amount) = +amount)
       const newBalance = fromAccount.balance - transactionToDelete.amount
-      await supabase.from("platforms").update({ saldo: newBalance }).eq("id", fromAccount.id)
+      await DatabaseService.updatePlatform(fromAccount.id, { saldo: newBalance }, user.id)
     }
 
     if (transactionToDelete.type === "transfer" && transactionToDelete.toAccountId) {
       const toAccount = accounts.find((acc) => acc.name === transactionToDelete.toAccountId)
       if (toAccount) {
         const newBalance = toAccount.balance - Math.abs(transactionToDelete.amount)
-        await supabase.from("platforms").update({ saldo: newBalance }).eq("id", toAccount.id)
+        await DatabaseService.updatePlatform(toAccount.id, { saldo: newBalance }, user.id)
       }
     }
 
-    // 4. Ambil data terbaru untuk me-refresh UI
     await fetchData()
   }
 
@@ -561,9 +542,8 @@ export default function DashboardPage() {
           </Card>
 
           <Card className="neobrutalism-card">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-xs sm:text-sm font-semibold leading-tight">Saldo Tabungan</CardTitle>
-              <PiggyBank className="h-4 w-4 sm:h-5 sm:w-5 text-chart-1 flex-shrink-0" />
+            <CardHeader>
+              <CardTitle className="text-lg sm:text-xl font-bold font-manrope">Saldo Tabungan</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="text-sm sm:text-base lg:text-lg font-bold text-chart-1 break-words hyphens-auto leading-tight">
