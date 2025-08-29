@@ -15,22 +15,27 @@ export function AuthGuard({ children }: AuthGuardProps) {
   const router = useRouter()
   const pathname = usePathname()
 
-  const publicRoutes = ["/login", "/signup"]
-  const isPublicRoute = publicRoutes.includes(pathname)
-
   useEffect(() => {
-    if (!loading) {
-      if (!user && !isPublicRoute) {
-        // Redirect to login if not authenticated and trying to access protected route
-        router.push("/login")
-      } else if (user && isPublicRoute) {
-        // Redirect to dashboard if authenticated and trying to access auth pages
-        router.push("/")
-      }
+    // Jangan lakukan apa-apa jika status auth masih loading
+    if (loading) {
+      return
     }
-  }, [user, loading, isPublicRoute, router])
 
-  // Show loading spinner while checking auth
+    const publicRoutes = ["/login", "/signup"]
+    const isPublicRoute = publicRoutes.includes(pathname)
+
+    // Jika pengguna tidak login DAN mencoba akses halaman privat, arahkan ke login
+    if (!user && !isPublicRoute) {
+      router.push("/login")
+    }
+
+    // Jika pengguna sudah login DAN mencoba akses halaman login/signup, arahkan ke dashboard
+    if (user && isPublicRoute) {
+      router.push("/")
+    }
+  }, [user, loading, pathname, router]) // Menggunakan pathname di dependency array lebih aman
+
+  // Tampilkan loading spinner selagi memeriksa status otentikasi
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -42,15 +47,7 @@ export function AuthGuard({ children }: AuthGuardProps) {
     )
   }
 
-  // Don't render protected content if user is not authenticated
-  if (!user && !isPublicRoute) {
-    return null
-  }
-
-  // Don't render auth pages if user is already authenticated
-  if (user && isPublicRoute) {
-    return null
-  }
-
+  // Setelah loading selesai, selalu render konten halaman.
+  // useEffect akan menangani pengalihan jika diperlukan.
   return <>{children}</>
 }
